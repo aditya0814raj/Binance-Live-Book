@@ -104,7 +104,8 @@ export const useBinanceData = (symbol: string) => {
     }
 
     const lowerCaseSymbol = symbol.toLowerCase();
-    const newWs = new WebSocket(`wss://stream.binance.com:9443/ws/${lowerCaseSymbol}@depth20@100ms/${lowerCaseSymbol}@aggTrade`);
+    const streams = [`${lowerCaseSymbol}@depth20@100ms`, `${lowerCaseSymbol}@aggTrade`];
+    const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
     ws.current = newWs;
     
     newWs.onopen = () => setStatus('connected');
@@ -137,12 +138,12 @@ export const useBinanceData = (symbol: string) => {
   }, [symbol, toast]);
 
   const processDepthUpdate = (update: DepthUpdate) => {
-    if (update.u <= lastUpdateId.current!) return;
+    if (lastUpdateId.current === null || update.u <= lastUpdateId.current) return;
 
-    if (update.U <= lastUpdateId.current! + 1 && update.u >= lastUpdateId.current! + 1) {
+    if (update.U <= lastUpdateId.current + 1 && update.u >= lastUpdateId.current + 1) {
       dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
       lastUpdateId.current = update.u;
-    } else if (update.U > lastUpdateId.current! + 1) {
+    } else if (update.U > lastUpdateId.current + 1) {
         console.log("Order book out of sync, re-initializing...");
         connect();
     }
