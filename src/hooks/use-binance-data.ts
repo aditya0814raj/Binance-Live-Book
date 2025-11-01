@@ -79,7 +79,7 @@ export const useBinanceData = (symbol: string) => {
     ws.current?.close();
 
     try {
-      const response = await fetch(`https://api.binance.com/api/v3/depth?symbol=${symbol.toUpperCase()}&limit=1000`);
+      const response = await fetch(`/api/depth?symbol=${symbol.toUpperCase()}`);
       if (!response.ok) throw new Error('Failed to fetch snapshot');
       const snapshot = await response.json();
 
