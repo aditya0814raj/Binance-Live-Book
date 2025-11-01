@@ -104,21 +104,21 @@ export const useBinanceData = (symbol: string) => {
     }
 
     const lowerCaseSymbol = symbol.toLowerCase();
-    const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${lowerCaseSymbol}@depth/${lowerCaseSymbol}@aggTrade`);
+    const newWs = new WebSocket(`wss://stream.binance.com:9443/ws/${lowerCaseSymbol}@depth20@100ms/${lowerCaseSymbol}@aggTrade`);
     ws.current = newWs;
     
     newWs.onopen = () => setStatus('connected');
     
     newWs.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      if (message.stream.endsWith('@depth')) {
+      if (message.stream.includes('@depth')) {
         const depthUpdate: DepthUpdate = message.data;
         if (snapshotApplied.current) {
           processDepthUpdate(depthUpdate);
         } else {
           eventQueue.current.push(depthUpdate);
         }
-      } else if (message.stream.endsWith('@aggTrade')) {
+      } else if (message.stream.includes('@aggTrade')) {
         const trade: Trade = message.data;
         setTrades((prev) => [trade, ...prev].slice(0, 50));
       }
@@ -142,9 +142,9 @@ export const useBinanceData = (symbol: string) => {
     if (update.U <= lastUpdateId.current! + 1 && update.u >= lastUpdateId.current! + 1) {
       dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
       lastUpdateId.current = update.u;
-    } else {
-      console.log("Order book out of sync, re-initializing...");
-      connect();
+    } else if (update.U > lastUpdateId.current! + 1) {
+        console.log("Order book out of sync, re-initializing...");
+        connect();
     }
   };
 
