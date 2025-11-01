@@ -143,7 +143,7 @@ export const useBinanceData = (symbol: string) => {
       dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
       lastUpdateId.current = update.u;
     } else {
-      console.error("Order book out of sync, re-initializing...");
+      console.log("Order book out of sync, re-initializing...");
       connect();
     }
   };
