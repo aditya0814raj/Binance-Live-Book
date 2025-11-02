@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useReducer, useRef, useCallback } from 'react';
-import type { Trade, DepthUpdate, OrderBookEntry } from '@/lib/types';
+import type { Trade, DepthUpdate } from '@/lib/types';
 import { useToast } from "@/hooks/use-toast";
 
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
@@ -60,8 +60,7 @@ export const useBinanceData = (symbol: string) => {
   const ws = useRef<WebSocket | null>(null);
   const lastUpdateId = useRef<number | null>(null);
   const eventQueue = useRef<DepthUpdate[]>([]);
-  const snapshotApplied = useRef(false);
-  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isConnecting = useRef(false);
 
   // Throttled states for UI
   const [throttledBids, setThrottledBids] = useState(new Map<string, string>());
@@ -70,102 +69,115 @@ export const useBinanceData = (symbol: string) => {
   const lastUpdate = useRef(0);
 
   const connect = useCallback(async (currentSymbol: string) => {
-    // Reset state for new connection
+    if (isConnecting.current) return;
+    isConnecting.current = true;
+
+    // 1. Reset state and close any existing connection
     setStatus('connecting');
+    if (ws.current) {
+      ws.current.onopen = null;
+      ws.current.onmessage = null;
+      ws.current.onerror = null;
+      ws.current.onclose = null;
+      ws.current.close();
+      ws.current = null;
+    }
     dispatch({ type: 'RESET' });
     setTrades([]);
     eventQueue.current = [];
-    snapshotApplied.current = false;
     lastUpdateId.current = null;
-    
-    // Ensure previous connection is closed
-    if (ws.current) {
-        ws.current.onopen = null;
-        ws.current.onmessage = null;
-        ws.current.onclose = null;
-        ws.current.onerror = null;
-        ws.current.close();
-    }
-    if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-    }
 
     try {
+      // 2. Fetch the initial depth snapshot
       const response = await fetch(`/api/depth?symbol=${currentSymbol.toUpperCase()}`);
-      if (!response.ok) throw new Error('Failed to fetch snapshot');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Failed to fetch snapshot: ${errorData.msg || response.statusText}`);
+      }
       const snapshot = await response.json();
 
-      // If the symbol has changed while we were fetching, abort.
-      if (symbol !== currentSymbol) return;
-
+      // If symbol changed while fetching, abort this connection attempt
+      if (symbol !== currentSymbol) {
+        isConnecting.current = false;
+        return;
+      }
+      
+      // 3. Initialize order book from snapshot
       lastUpdateId.current = snapshot.lastUpdateId;
       dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
-      snapshotApplied.current = true;
 
-      const processDepthUpdate = (update: DepthUpdate) => {
-        if (lastUpdateId.current === null || update.u <= lastUpdateId.current) return;
-    
-        if (update.U <= lastUpdateId.current + 1 && update.u >= lastUpdateId.current + 1) {
-          dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
-          lastUpdateId.current = update.u;
-        } else if (update.U > lastUpdateId.current + 1) {
-            console.log("Order book out of sync, re-initializing...");
-            connect(currentSymbol);
-        }
-      };
-
-      // Process any buffered events
-      const queue = eventQueue.current;
-      eventQueue.current = [];
-      queue.forEach(processDepthUpdate);
-      
+      // 4. Establish WebSocket connection
       const lowerCaseSymbol = currentSymbol.toLowerCase();
       const streams = [`${lowerCaseSymbol}@depth@100ms`, `${lowerCaseSymbol}@aggTrade`];
       const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
       ws.current = newWs;
-      
+
       newWs.onopen = () => {
-        if (ws.current === newWs) setStatus('connected');
+        if (ws.current === newWs) {
+          setStatus('connected');
+          isConnecting.current = false;
+          // Process any events that were buffered before snapshot was ready and applied
+          const queue = eventQueue.current;
+          eventQueue.current = [];
+          queue.forEach(handleMessageData);
+        }
       };
       
+      const handleMessageData = (data: any) => {
+        if (data.stream.includes('@depth')) {
+          const update: DepthUpdate = data.data;
+          // Apply updates only if they are for the current order book
+          if (lastUpdateId.current && update.u > lastUpdateId.current) {
+            if (update.U <= lastUpdateId.current + 1) {
+              dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
+              lastUpdateId.current = update.u;
+            } else {
+              // Out of sync, reconnect
+              console.log("Order book out of sync, re-initializing...");
+              if (ws.current) ws.current.close(); // Triggers onclose -> reconnect
+            }
+          }
+        } else if (data.stream.includes('@aggTrade')) {
+          const trade: Trade = data.data;
+          setTrades((prev) => [trade, ...prev].slice(0, 50));
+        }
+      };
+
       newWs.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.stream.includes('@depth')) {
-          const depthUpdate: DepthUpdate = message.data;
-          if (snapshotApplied.current) {
-            processDepthUpdate(depthUpdate);
-          } else {
-            eventQueue.current.push(depthUpdate);
-          }
-        } else if (message.stream.includes('@aggTrade')) {
-          const trade: Trade = message.data;
-          setTrades((prev) => [trade, ...prev].slice(0, 50));
+        // If snapshot is not processed, buffer events
+        if (lastUpdateId.current) {
+          handleMessageData(message);
+        } else {
+          eventQueue.current.push(message);
         }
       };
   
       newWs.onclose = () => {
-          if (ws.current === newWs) {
+          if (ws.current === newWs || !ws.current) {
               setStatus('disconnected');
+              isConnecting.current = false;
+              // Optional: implement retry logic here if desired
           }
       };
+
       newWs.onerror = (error) => {
         if (ws.current === newWs) {
             console.error('WebSocket error:', error);
             setStatus('error');
+            isConnecting.current = false;
         }
       };
 
     } catch (error) {
-      console.error('Snapshot fetch error:', error);
+      console.error('Connection process error:', error);
       setStatus('error');
+      isConnecting.current = false;
       toast({
         variant: "destructive",
         title: "API Error",
-        description: "Failed to fetch initial order book. Retrying...",
+        description: `Failed to connect to ${currentSymbol}. Please try again.`,
       });
-      // Retry after 5s
-      retryTimeoutRef.current = setTimeout(() => connect(currentSymbol), 5000); 
-      return;
     }
   }, [symbol, toast]);
 
@@ -173,12 +185,16 @@ export const useBinanceData = (symbol: string) => {
     if (symbol) {
         connect(symbol);
     }
+    // Cleanup function
     return () => {
+      isConnecting.current = false;
       if (ws.current) {
+        ws.current.onopen = null;
+        ws.current.onmessage = null;
+        ws.current.onerror = null;
+        ws.current.onclose = null;
         ws.current.close();
-      }
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
+        ws.current = null;
       }
     };
   }, [symbol, connect]);
