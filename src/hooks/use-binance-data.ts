@@ -59,9 +59,8 @@ export const useBinanceData = (symbol: string) => {
 
   const ws = useRef<WebSocket | null>(null);
   const lastUpdateId = useRef<number | null>(null);
-  const eventQueue = useRef<DepthUpdate[]>([]);
-  const isConnecting = useRef(false);
-
+  const eventQueue = useRef<any[]>([]);
+  
   // Throttled states for UI
   const [throttledBids, setThrottledBids] = useState(new Map<string, string>());
   const [throttledAsks, setThrottledAsks] = useState(new Map<string, string>());
@@ -69,16 +68,9 @@ export const useBinanceData = (symbol: string) => {
   const lastUpdate = useRef(0);
 
   const connect = useCallback(async (currentSymbol: string) => {
-    if (isConnecting.current) return;
-    isConnecting.current = true;
-
     // 1. Reset state and close any existing connection
     setStatus('connecting');
     if (ws.current) {
-      ws.current.onopen = null;
-      ws.current.onmessage = null;
-      ws.current.onerror = null;
-      ws.current.onclose = null;
       ws.current.close();
       ws.current = null;
     }
@@ -96,9 +88,8 @@ export const useBinanceData = (symbol: string) => {
       }
       const snapshot = await response.json();
 
-      // If symbol changed while fetching, abort this connection attempt
+      // If symbol changed while fetching, abort
       if (symbol !== currentSymbol) {
-        isConnecting.current = false;
         return;
       }
       
@@ -106,73 +97,74 @@ export const useBinanceData = (symbol: string) => {
       lastUpdateId.current = snapshot.lastUpdateId;
       dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
 
+      // Process any events that were buffered before snapshot was ready and applied
+      const queue = eventQueue.current;
+      eventQueue.current = [];
+
+      const processUpdate = (update: DepthUpdate) => {
+        if (!lastUpdateId.current) return;
+
+        if (update.u > lastUpdateId.current) {
+           if (update.U <= lastUpdateId.current + 1) {
+            dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
+            lastUpdateId.current = update.u;
+           } else {
+             console.log("Order book out of sync, re-initializing...");
+             if (ws.current) ws.current.close(); // Triggers onclose -> reconnect
+           }
+        }
+      }
+      
+      queue.forEach(data => {
+        if (data.stream.includes('@depth')) {
+          processUpdate(data.data);
+        } else if (data.stream.includes('@aggTrade')) {
+           setTrades((prev) => [data.data, ...prev].slice(0, 50));
+        }
+      });
+
+
       // 4. Establish WebSocket connection
       const lowerCaseSymbol = currentSymbol.toLowerCase();
-      const streams = [`${lowerCaseSymbol}@depth@100ms`, `${lowerCaseSymbol}@aggTrade`];
+      const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
       const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
       ws.current = newWs;
-
+      
       newWs.onopen = () => {
-        if (ws.current === newWs) {
-          setStatus('connected');
-          isConnecting.current = false;
-          // Process any events that were buffered before snapshot was ready and applied
-          const queue = eventQueue.current;
-          eventQueue.current = [];
-          queue.forEach(handleMessageData);
-        }
+        setStatus('connected');
       };
       
-      const handleMessageData = (data: any) => {
-        if (data.stream.includes('@depth')) {
-          const update: DepthUpdate = data.data;
-          // Apply updates only if they are for the current order book
-          if (lastUpdateId.current && update.u > lastUpdateId.current) {
-            if (update.U <= lastUpdateId.current + 1) {
-              dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
-              lastUpdateId.current = update.u;
-            } else {
-              // Out of sync, reconnect
-              console.log("Order book out of sync, re-initializing...");
-              if (ws.current) ws.current.close(); // Triggers onclose -> reconnect
-            }
-          }
-        } else if (data.stream.includes('@aggTrade')) {
-          const trade: Trade = data.data;
-          setTrades((prev) => [trade, ...prev].slice(0, 50));
-        }
-      };
-
       newWs.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        // If snapshot is not processed, buffer events
-        if (lastUpdateId.current) {
-          handleMessageData(message);
-        } else {
+        if (!lastUpdateId.current) {
           eventQueue.current.push(message);
+          return;
+        }
+
+        if (message.stream.includes('@depth')) {
+           processUpdate(message.data);
+        } else if (message.stream.includes('@aggTrade')) {
+          const trade: Trade = message.data;
+          setTrades((prev) => [trade, ...prev].slice(0, 50));
         }
       };
   
       newWs.onclose = () => {
-          if (ws.current === newWs || !ws.current) {
-              setStatus('disconnected');
-              isConnecting.current = false;
-              // Optional: implement retry logic here if desired
-          }
+        if (ws.current === newWs) { // Only update status if it's the current socket
+          setStatus('disconnected');
+        }
       };
 
       newWs.onerror = (error) => {
-        if (ws.current === newWs) {
-            console.error('WebSocket error:', error);
-            setStatus('error');
-            isConnecting.current = false;
+        console.error('WebSocket error:', error);
+        if (ws.current === newWs) { // Only update status if it's the current socket
+          setStatus('error');
         }
       };
 
     } catch (error) {
       console.error('Connection process error:', error);
       setStatus('error');
-      isConnecting.current = false;
       toast({
         variant: "destructive",
         title: "API Error",
@@ -187,12 +179,7 @@ export const useBinanceData = (symbol: string) => {
     }
     // Cleanup function
     return () => {
-      isConnecting.current = false;
       if (ws.current) {
-        ws.current.onopen = null;
-        ws.current.onmessage = null;
-        ws.current.onerror = null;
-        ws.current.onclose = null;
         ws.current.close();
         ws.current = null;
       }
