@@ -12,8 +12,8 @@ interface OrderBookState {
 }
 
 type OrderBookAction =
-  | { type: 'INIT'; payload: { bids: OrderBookEntry[]; asks: OrderBookEntry[] } }
-  | { type: 'UPDATE'; payload: { bids: OrderBookEntry[]; asks: OrderBookEntry[] } }
+  | { type: 'INIT'; payload: { bids: [string, string][]; asks: [string, string][] } }
+  | { type: 'UPDATE'; payload: { bids: [string, string][]; asks: [string, string][] } }
   | { type: 'RESET' };
 
 const orderBookReducer = (state: OrderBookState, action: OrderBookAction): OrderBookState => {
@@ -170,7 +170,9 @@ export const useBinanceData = (symbol: string) => {
   }, [symbol, toast]);
 
   useEffect(() => {
-    connect(symbol);
+    if (symbol) {
+        connect(symbol);
+    }
     return () => {
       if (ws.current) {
         ws.current.close();
@@ -179,7 +181,7 @@ export const useBinanceData = (symbol: string) => {
         clearTimeout(retryTimeoutRef.current);
       }
     };
-  }, [connect, symbol]);
+  }, [symbol, connect]);
 
   // Throttling mechanism
   useEffect(() => {
