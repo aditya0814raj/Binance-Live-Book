@@ -60,6 +60,7 @@ export const useBinanceData = (symbol: string) => {
   const ws = useRef<WebSocket | null>(null);
   const lastUpdateId = useRef<number | null>(null);
   const eventQueue = useRef<any[]>([]);
+  const isFetchingSnapshot = useRef(false);
   
   // Throttled states for UI
   const [throttledBids, setThrottledBids] = useState(new Map<string, string>());
@@ -69,15 +70,49 @@ export const useBinanceData = (symbol: string) => {
 
   const connect = useCallback(async (currentSymbol: string) => {
     // 1. Reset state and close any existing connection
-    setStatus('connecting');
     if (ws.current) {
       ws.current.close();
-      ws.current = null;
     }
+    
+    setStatus('connecting');
     dispatch({ type: 'RESET' });
     setTrades([]);
     eventQueue.current = [];
     lastUpdateId.current = null;
+    isFetchingSnapshot.current = true;
+
+    // 4. Establish WebSocket connection
+    const lowerCaseSymbol = currentSymbol.toLowerCase();
+    const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
+    const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
+    ws.current = newWs;
+    
+    newWs.onopen = () => {
+      // Don't set to connected yet, wait for snapshot
+    };
+    
+    newWs.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (isFetchingSnapshot.current) {
+            eventQueue.current.push(message);
+        } else {
+            processMessage(message);
+        }
+    };
+
+    newWs.onclose = () => {
+      if (ws.current === newWs) { // Only update status if it's the current socket
+        setStatus('disconnected');
+      }
+    };
+
+    newWs.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      if (ws.current === newWs) { // Only update status if it's the current socket
+        setStatus('error');
+      }
+    };
+
 
     try {
       // 2. Fetch the initial depth snapshot
@@ -96,71 +131,15 @@ export const useBinanceData = (symbol: string) => {
       // 3. Initialize order book from snapshot
       lastUpdateId.current = snapshot.lastUpdateId;
       dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
+      isFetchingSnapshot.current = false;
+      setStatus('connected');
 
       // Process any events that were buffered before snapshot was ready and applied
       const queue = eventQueue.current;
       eventQueue.current = [];
-
-      const processUpdate = (update: DepthUpdate) => {
-        if (!lastUpdateId.current) return;
-
-        if (update.u > lastUpdateId.current) {
-           if (update.U <= lastUpdateId.current + 1) {
-            dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
-            lastUpdateId.current = update.u;
-           } else {
-             console.log("Order book out of sync, re-initializing...");
-             if (ws.current) ws.current.close(); // Triggers onclose -> reconnect
-           }
-        }
-      }
       
-      queue.forEach(data => {
-        if (data.stream.includes('@depth')) {
-          processUpdate(data.data);
-        } else if (data.stream.includes('@aggTrade')) {
-           setTrades((prev) => [data.data, ...prev].slice(0, 50));
-        }
-      });
+      queue.forEach(processMessage);
 
-
-      // 4. Establish WebSocket connection
-      const lowerCaseSymbol = currentSymbol.toLowerCase();
-      const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
-      const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
-      ws.current = newWs;
-      
-      newWs.onopen = () => {
-        setStatus('connected');
-      };
-      
-      newWs.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        if (!lastUpdateId.current) {
-          eventQueue.current.push(message);
-          return;
-        }
-
-        if (message.stream.includes('@depth')) {
-           processUpdate(message.data);
-        } else if (message.stream.includes('@aggTrade')) {
-          const trade: Trade = message.data;
-          setTrades((prev) => [trade, ...prev].slice(0, 50));
-        }
-      };
-  
-      newWs.onclose = () => {
-        if (ws.current === newWs) { // Only update status if it's the current socket
-          setStatus('disconnected');
-        }
-      };
-
-      newWs.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        if (ws.current === newWs) { // Only update status if it's the current socket
-          setStatus('error');
-        }
-      };
 
     } catch (error) {
       console.error('Connection process error:', error);
@@ -170,8 +149,31 @@ export const useBinanceData = (symbol: string) => {
         title: "API Error",
         description: `Failed to connect to ${currentSymbol}. Please try again.`,
       });
+      if (ws.current) ws.current.close();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, toast]);
+
+  const processMessage = useCallback((message: any) => {
+    if (message.stream.includes('@depth')) {
+      const update : DepthUpdate = message.data;
+      if (!lastUpdateId.current) return;
+
+      if (update.u > lastUpdateId.current) {
+         if (update.U <= lastUpdateId.current + 1) {
+          dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
+          lastUpdateId.current = update.u;
+         } else {
+           console.log("Order book out of sync, re-initializing...");
+           if (ws.current) ws.current.close(); // Triggers onclose -> reconnect
+           connect(symbol);
+         }
+      }
+    } else if (message.stream.includes('@aggTrade')) {
+      const trade: Trade = message.data;
+      setTrades((prev) => [trade, ...prev].slice(0, 50));
+    }
+  }, [connect, symbol]);
 
   useEffect(() => {
     if (symbol) {
