@@ -4,7 +4,7 @@ This is a high-performance, real-time cryptocurrency order book visualizer built
 
 ## Live Demo
 
-Link to your deployed application:https://binance-live-book.vercel.app/
+Link to your deployed application:https://binance-live-book-gmz9.vercel.app/
 
 *(Note: You will need to replace this with your actual deployment link after deploying the project.)*
 
