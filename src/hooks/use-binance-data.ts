@@ -72,24 +72,19 @@ export const useBinanceData = (symbol: string) => {
     if (message.stream.includes('@depth')) {
       const update : DepthUpdate = message.data;
       
-      // If we are still waiting for the snapshot, do nothing with depth messages.
       if (lastUpdateId.current === null) return;
 
-      // Drop any event where u is <= lastUpdateId in the snapshot.
       if (update.u <= lastUpdateId.current) {
         return;
       }
       
-      // The first processed event should have U <= lastUpdateId+1 AND u >= lastUpdateId+1.
       if (update.U <= lastUpdateId.current + 1 && update.u >= lastUpdateId.current + 1) {
         dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
         lastUpdateId.current = update.u;
       } else if (update.U > lastUpdateId.current + 1) {
-        // If we receive an event that doesn't line up, we are out of sync and need to reconnect.
         console.warn("Order book out of sync, re-initializing...");
-        // The connect function will be called by the useEffect dependency array change
         if (ws.current) {
-            ws.current.close(); // This will trigger the reconnect logic in useEffect
+            ws.current.close();
         }
       } else {
          dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
@@ -101,99 +96,108 @@ export const useBinanceData = (symbol: string) => {
     }
   }, []);
 
-  const connect = useCallback(async (currentSymbol: string) => {
-    if (ws.current) {
-      ws.current.close();
-    }
-    
-    setStatus('connecting');
-    dispatch({ type: 'RESET' });
-    setTrades([]);
-    eventQueue.current = [];
-    lastUpdateId.current = null;
-    isFetchingSnapshot.current = true;
-
-    try {
-      const response = await fetch(`/api/depth?symbol=${currentSymbol.toUpperCase()}`);
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(`Failed to fetch snapshot: ${errorData.details?.msg || response.statusText}`);
-      }
-      const snapshot = await response.json();
-
-      if (symbol !== currentSymbol) {
-        // If the symbol changed while we were fetching, abort.
-        return;
-      }
-      
-      lastUpdateId.current = snapshot.lastUpdateId;
-      dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
-      isFetchingSnapshot.current = false;
-      
-
-      const lowerCaseSymbol = currentSymbol.toLowerCase();
-      const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
-      const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
-      ws.current = newWs;
-      
-      newWs.onopen = () => {
-        if (ws.current === newWs) {
-          setStatus('connected');
-          // Process any events that were buffered before snapshot was ready and applied
-          const queue = eventQueue.current;
-          eventQueue.current = [];
-          queue.forEach(processMessage);
-        }
-      };
-      
-      newWs.onmessage = (event) => {
-          const message = JSON.parse(event.data);
-          if (isFetchingSnapshot.current) {
-              eventQueue.current.push(message);
-          } else {
-              processMessage(message);
-          }
-      };
-
-      newWs.onclose = () => {
-        if (ws.current === newWs) { 
-          setStatus('disconnected');
-        }
-      };
-
-      newWs.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        if (ws.current === newWs) {
-          setStatus('error');
-        }
-        newWs.close();
-      };
-
-    } catch (error: any) {
-      console.error('Connection process error:', error);
-      setStatus('error');
-      toast({
-        variant: "destructive",
-        title: "API Error",
-        description: error.message || `Failed to connect to ${currentSymbol}. Please try again.`,
-      });
-      if (ws.current) ws.current.close();
-    }
-  }, [symbol, toast, processMessage]);
-
   useEffect(() => {
-    if (symbol) {
-        connect(symbol);
-    }
-    return () => {
+    if (!symbol) return;
+
+    let isMounted = true;
+    const currentSymbol = symbol;
+
+    const connect = async () => {
       if (ws.current) {
-        ws.current.onclose = null; // Prevent onclose from running on manual close
+        ws.current.close();
+      }
+
+      if (!isMounted) return;
+
+      setStatus('connecting');
+      dispatch({ type: 'RESET' });
+      setTrades([]);
+      eventQueue.current = [];
+      lastUpdateId.current = null;
+      isFetchingSnapshot.current = true;
+
+      try {
+        const response = await fetch(`/api/depth?symbol=${currentSymbol.toUpperCase()}`);
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(`Failed to fetch snapshot: ${errorData.details?.msg || response.statusText}`);
+        }
+        const snapshot = await response.json();
+
+        if (!isMounted || currentSymbol !== symbol) return;
+        
+        lastUpdateId.current = snapshot.lastUpdateId;
+        dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
+        
+        // Process any events that were queued while snapshot was being fetched
+        const eventsToProcess = eventQueue.current.filter(e => e.data.u > snapshot.lastUpdateId);
+        eventsToProcess.forEach(processMessage);
+
+        isFetchingSnapshot.current = false;
+        eventQueue.current = [];
+
+        const lowerCaseSymbol = currentSymbol.toLowerCase();
+        const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
+        const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`);
+        ws.current = newWs;
+        
+        newWs.onopen = () => {
+          if (ws.current === newWs) {
+            setStatus('connected');
+          }
+        };
+        
+        newWs.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            if (isFetchingSnapshot.current) {
+                eventQueue.current.push(message);
+            } else {
+                processMessage(message);
+            }
+        };
+
+        newWs.onclose = () => {
+          if (ws.current === newWs) { 
+            // Only set to disconnected if it's the current socket and not because of a new connection being initiated
+            setStatus('disconnected');
+          }
+        };
+
+        newWs.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          if (ws.current === newWs) {
+            setStatus('error');
+          }
+          newWs.close();
+        };
+
+      } catch (error: any) {
+        console.error('Connection process error:', error);
+        if (isMounted) {
+          setStatus('error');
+          toast({
+            variant: "destructive",
+            title: "API Error",
+            description: error.message || `Failed to connect to ${currentSymbol}. Please try again.`,
+          });
+        }
+        if (ws.current) ws.current.close();
+      }
+    };
+    
+    connect();
+
+    return () => {
+      isMounted = false;
+      if (ws.current) {
+        ws.current.onclose = null; 
         ws.current.onerror = null;
         ws.current.close();
         ws.current = null;
       }
     };
-  }, [symbol, connect]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, toast, processMessage]);
 
   // Throttling mechanism
   useEffect(() => {
