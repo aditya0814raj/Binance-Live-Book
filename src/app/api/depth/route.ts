@@ -1,39 +1,44 @@
-import { NextResponse } from 'next/server';
+import { NextResponse } from "next/server";
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const symbol = searchParams.get('symbol');
+export const runtime = "edge"; // run on Vercel Edge Network
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const symbol = searchParams.get("symbol")?.toUpperCase();
 
   if (!symbol) {
-    return NextResponse.json({ error: 'Symbol is required' }, { status: 400 });
+    return NextResponse.json({ error: "Symbol is required" }, { status: 400 });
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
-
   try {
-    const apiUrl = process.env.BINANCE_API_URL || "https://api.binance.com/api/v3";
-    const response = await fetch(
-      `${apiUrl}/depth?symbol=${symbol.toUpperCase()}&limit=1000`,
-      { signal: controller.signal }
-    );
-    clearTimeout(timeout);
+    const binanceUrl = `https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=1000`;
+
+    const response = await fetch(binanceUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0", // Pretend to be a browser → avoids blocks
+      },
+      next: { revalidate: 0 }, // prevent caching
+    });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
+      const err = await response.text();
       return NextResponse.json(
-        { error: 'Failed to fetch data from Binance', details: errorData },
+        { error: "Binance fetch failed", details: err },
         { status: response.status }
       );
     }
 
     const data = await response.json();
-    return NextResponse.json(data);
-
+    return NextResponse.json(data, {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store", // ensure fresh data
+      },
+    });
   } catch (error: any) {
-    if (error.name === 'AbortError') {
-      return NextResponse.json({ error: 'Request timed out' }, { status: 504 });
-    }
-    return NextResponse.json({ error: 'Internal Server Error', details: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Internal Server Error", details: error.message },
+      { status: 500 }
+    );
   }
 }
