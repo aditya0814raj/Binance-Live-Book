@@ -17,8 +17,8 @@ type OrderBookAction =
   | { type: 'RESET' };
 
 const orderBookReducer = (state: OrderBookState, action: OrderBookAction): OrderBookState => {
-  const updateMap = (map: Map<string, string>, updates: [string, string][]) => {
-    const newMap = new Map(map);
+  const updateMap = (currentMap: Map<string, string>, updates: [string, string][]) => {
+    const newMap = new Map(currentMap);
     for (const [price, quantity] of updates) {
       if (parseFloat(quantity) === 0) {
         newMap.delete(price);
@@ -91,24 +91,38 @@ export const useBinanceData = (symbol: string) => {
         }
         const snapshot = await response.json();
         
+        if (!isMounted) return;
+
         lastUpdateId = snapshot.lastUpdateId;
         dispatch({ type: 'SET_SNAPSHOT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
 
         // Process queued events
         const updatesToApply = {bids: [] as [string, string][], asks: [] as [string, string][]};
-        eventQueue.forEach(update => {
-          if (update.u > snapshot.lastUpdateId) {
-             if (update.U <= snapshot.lastUpdateId + 1 && update.u >= snapshot.lastUpdateId + 1) {
-                updatesToApply.bids.push(...update.b);
-                updatesToApply.asks.push(...update.a);
-                lastUpdateId = update.u;
-            } else if (update.U > snapshot.lastUpdateId + 1) {
-                // This means we missed updates, log and will trigger reconnect
-                console.warn(`Missed an update. Last snapshot ID: ${snapshot.lastUpdateId}, current update start ID: ${update.U}. Reconnecting.`);
-                ws.current?.close();
+        let firstUpdateProcessed = false;
+
+        for (const update of eventQueue) {
+            if (update.u < lastUpdateId) continue;
+
+            if (!firstUpdateProcessed) {
+                if (update.U <= lastUpdateId + 1 && update.u >= lastUpdateId + 1) {
+                    updatesToApply.bids.push(...update.b);
+                    updatesToApply.asks.push(...update.a);
+                    lastUpdateId = update.u;
+                    firstUpdateProcessed = true;
+                }
+            } else {
+                if (update.U === lastUpdateId + 1) {
+                    updatesToApply.bids.push(...update.b);
+                    updatesToApply.asks.push(...update.a);
+                    lastUpdateId = update.u;
+                } else {
+                    console.warn("Missed an update. Reconnecting.");
+                    ws.current?.close();
+                    return;
+                }
             }
-          }
-        });
+        }
+        
         if(updatesToApply.bids.length > 0 || updatesToApply.asks.length > 0) {
             dispatch({ type: 'UPDATE', payload: updatesToApply });
         }
@@ -122,7 +136,11 @@ export const useBinanceData = (symbol: string) => {
           setStatus('error');
           toast({ variant: "destructive", title: "API Error", description: error.message });
         }
-        return; // Don't try to connect WebSocket if snapshot fails
+        // Don't try to connect WebSocket if snapshot fails, try reconnecting
+        setTimeout(() => {
+            if (isMounted) connect();
+        }, 5000);
+        return;
       }
 
       const lowerCaseSymbol = symbol.toLowerCase();
@@ -142,14 +160,16 @@ export const useBinanceData = (symbol: string) => {
           if (isFetchingSnapshot) {
             eventQueue.push(data);
           } else {
-            if (data.U <= lastUpdateId! + 1 && data.u >= lastUpdateId! + 1) {
-                dispatch({ type: 'UPDATE', payload: { bids: data.b, asks: data.a } });
-                lastUpdateId = data.u;
-            } else if (data.U > lastUpdateId! + 1) {
-                console.warn("Order book out of sync, re-initializing...");
-                if (ws.current) {
-                    ws.current.close(); // This will trigger the onclose handler to reconnect
-                }
+            if (lastUpdateId !== null) {
+              if (data.U === lastUpdateId + 1) {
+                  dispatch({ type: 'UPDATE', payload: { bids: data.b, asks: data.a } });
+                  lastUpdateId = data.u;
+              } else if (data.U > lastUpdateId + 1) {
+                  console.warn("Order book out of sync, re-initializing...");
+                  if (ws.current) {
+                      ws.current.close(); // This will trigger the onclose handler to reconnect
+                  }
+              }
             }
           }
         } else if (stream.includes('@aggTrade')) {
