@@ -72,7 +72,7 @@ export const useBinanceData = (symbol: string) => {
     if (message.stream.includes('@depth')) {
       const update : DepthUpdate = message.data;
       
-      // This is the initial check from the docs
+      // If we are still waiting for the snapshot, do nothing with depth messages.
       if (lastUpdateId.current === null) return;
 
       // Drop any event where u is <= lastUpdateId in the snapshot.
@@ -81,14 +81,16 @@ export const useBinanceData = (symbol: string) => {
       }
       
       // The first processed event should have U <= lastUpdateId+1 AND u >= lastUpdateId+1.
-      if (lastUpdateId.current !== null && update.U <= lastUpdateId.current + 1 && update.u >= lastUpdateId.current + 1) {
+      if (update.U <= lastUpdateId.current + 1 && update.u >= lastUpdateId.current + 1) {
         dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
         lastUpdateId.current = update.u;
-      } else if (lastUpdateId.current !== null && update.U > lastUpdateId.current + 1) {
+      } else if (update.U > lastUpdateId.current + 1) {
         // If we receive an event that doesn't line up, we are out of sync and need to reconnect.
-        console.log("Order book out of sync, re-initializing...");
+        console.warn("Order book out of sync, re-initializing...");
         // The connect function will be called by the useEffect dependency array change
-        if (ws.current) ws.current.close();
+        if (ws.current) {
+            ws.current.close(); // This will trigger the reconnect logic in useEffect
+        }
       } else {
          dispatch({ type: 'UPDATE', payload: { bids: update.b, asks: update.a } });
          lastUpdateId.current = update.u;
@@ -115,18 +117,19 @@ export const useBinanceData = (symbol: string) => {
       const response = await fetch(`/api/depth?symbol=${currentSymbol.toUpperCase()}`);
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(`Failed to fetch snapshot: ${errorData.msg || response.statusText}`);
+        throw new Error(`Failed to fetch snapshot: ${errorData.details?.msg || response.statusText}`);
       }
       const snapshot = await response.json();
 
       if (symbol !== currentSymbol) {
+        // If the symbol changed while we were fetching, abort.
         return;
       }
       
       lastUpdateId.current = snapshot.lastUpdateId;
       dispatch({ type: 'INIT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
       isFetchingSnapshot.current = false;
-      setStatus('connected');
+      
 
       const lowerCaseSymbol = currentSymbol.toLowerCase();
       const streams = [`${lowerCaseSymbol}@depth`, `${lowerCaseSymbol}@aggTrade`];
@@ -134,10 +137,13 @@ export const useBinanceData = (symbol: string) => {
       ws.current = newWs;
       
       newWs.onopen = () => {
-        // Process any events that were buffered before snapshot was ready and applied
-        const queue = eventQueue.current;
-        eventQueue.current = [];
-        queue.forEach(processMessage);
+        if (ws.current === newWs) {
+          setStatus('connected');
+          // Process any events that were buffered before snapshot was ready and applied
+          const queue = eventQueue.current;
+          eventQueue.current = [];
+          queue.forEach(processMessage);
+        }
       };
       
       newWs.onmessage = (event) => {
@@ -160,15 +166,16 @@ export const useBinanceData = (symbol: string) => {
         if (ws.current === newWs) {
           setStatus('error');
         }
+        newWs.close();
       };
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Connection process error:', error);
       setStatus('error');
       toast({
         variant: "destructive",
         title: "API Error",
-        description: `Failed to connect to ${currentSymbol}. Please try again.`,
+        description: error.message || `Failed to connect to ${currentSymbol}. Please try again.`,
       });
       if (ws.current) ws.current.close();
     }
@@ -180,7 +187,7 @@ export const useBinanceData = (symbol: string) => {
     }
     return () => {
       if (ws.current) {
-        ws.current.onclose = null;
+        ws.current.onclose = null; // Prevent onclose from running on manual close
         ws.current.onerror = null;
         ws.current.close();
         ws.current = null;
