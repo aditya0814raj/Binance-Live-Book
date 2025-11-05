@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect, useReducer, useRef } from 'react';
-import type { Trade, DepthUpdate } from '@/lib/types';
+import { useState, useEffect, useReducer, useRef } from "react";
+import type { Trade, DepthUpdate } from "@/lib/types";
 import { useToast } from "@/hooks/use-toast";
 
-type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
+type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
 interface OrderBookState {
   bids: Map<string, string>;
@@ -12,9 +12,9 @@ interface OrderBookState {
 }
 
 type OrderBookAction =
-  | { type: 'SET_SNAPSHOT'; payload: { bids: [string, string][]; asks: [string, string][] } }
-  | { type: 'UPDATE'; payload: { bids: [string, string][]; asks: [string, string][] } }
-  | { type: 'RESET' };
+  | { type: "SET_SNAPSHOT"; payload: { bids: [string, string][]; asks: [string, string][] } }
+  | { type: "UPDATE"; payload: { bids: [string, string][]; asks: [string, string][] } }
+  | { type: "RESET" };
 
 const orderBookReducer = (state: OrderBookState, action: OrderBookAction): OrderBookState => {
   const updateMap = (currentMap: Map<string, string>, updates: [string, string][]) => {
@@ -28,37 +28,36 @@ const orderBookReducer = (state: OrderBookState, action: OrderBookAction): Order
     }
     return newMap;
   };
-  
+
   switch (action.type) {
-    case 'SET_SNAPSHOT':
+    case "SET_SNAPSHOT":
       return {
         bids: new Map(action.payload.bids),
         asks: new Map(action.payload.asks),
       };
-    case 'UPDATE': {
+    case "UPDATE": {
       return {
         bids: updateMap(state.bids, action.payload.bids),
         asks: updateMap(state.asks, action.payload.asks),
       };
     }
-    case 'RESET':
-        return { bids: new Map(), asks: new Map() };
+    case "RESET":
+      return { bids: new Map(), asks: new Map() };
     default:
       return state;
   }
 };
 
-const THROTTLE_MS = 200; // Throttle UI updates
+const THROTTLE_MS = 200;
 
 export const useBinanceData = (symbol: string) => {
   const [orderBook, dispatch] = useReducer(orderBookReducer, { bids: new Map(), asks: new Map() });
   const [trades, setTrades] = useState<Trade[]>([]);
-  const [status, setStatus] = useState<ConnectionStatus>('connecting');
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const { toast } = useToast();
 
   const ws = useRef<WebSocket | null>(null);
-  
-  // Throttled states for UI
+
   const [throttledBids, setThrottledBids] = useState(new Map<string, string>());
   const [throttledAsks, setThrottledAsks] = useState(new Map<string, string>());
   const lastUiUpdate = useRef(0);
@@ -70,85 +69,84 @@ export const useBinanceData = (symbol: string) => {
     let isFetchingSnapshot = false;
 
     const connect = async () => {
-      if (ws.current) {
-        ws.current.close();
-      }
+      if (ws.current) ws.current.close();
       if (!isMounted) return;
 
-      setStatus('connecting');
-      dispatch({ type: 'RESET' });
+      setStatus("connecting");
+      dispatch({ type: "RESET" });
       setTrades([]);
       eventQueue = [];
       lastUpdateId = null;
       isFetchingSnapshot = true;
-      
+
       try {
         const response = await fetch(`/api/depth?symbol=${symbol.toUpperCase()}`);
         if (!isMounted) return;
 
-        if (!response.ok) {
-          throw new Error(`Failed to fetch snapshot: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`Failed to fetch snapshot: ${response.statusText}`);
+
         const snapshot = await response.json();
-        
         if (!isMounted) return;
 
         lastUpdateId = snapshot.lastUpdateId;
-        dispatch({ type: 'SET_SNAPSHOT', payload: { bids: snapshot.bids, asks: snapshot.asks } });
+        dispatch({ type: "SET_SNAPSHOT", payload: { bids: snapshot.bids, asks: snapshot.asks } });
 
-        // Process queued events
-        const updatesToApply = {bids: [] as [string, string][], asks: [] as [string, string][]};
+        const updatesToApply = { bids: [] as [string, string][], asks: [] as [string, string][] };
         let firstUpdateProcessed = false;
 
         for (const update of eventQueue) {
-            if (update.u < lastUpdateId) continue;
+          if (lastUpdateId !== null && update.u < lastUpdateId) continue;
 
-            if (!firstUpdateProcessed) {
-                if (update.U <= lastUpdateId + 1 && update.u >= lastUpdateId + 1) {
-                    updatesToApply.bids.push(...update.b);
-                    updatesToApply.asks.push(...update.a);
-                    lastUpdateId = update.u;
-                    firstUpdateProcessed = true;
-                }
-            } else {
-                if (update.U === lastUpdateId + 1) {
-                    updatesToApply.bids.push(...update.b);
-                    updatesToApply.asks.push(...update.a);
-                    lastUpdateId = update.u;
-                } else {
-                    console.warn("Missed an update. Reconnecting.");
-                    ws.current?.close();
-                    return;
-                }
+          if (!firstUpdateProcessed) {
+            if (
+              lastUpdateId !== null &&
+              update.U <= lastUpdateId + 1 &&
+              update.u >= lastUpdateId + 1
+            ) {
+              updatesToApply.bids.push(...update.b);
+              updatesToApply.asks.push(...update.a);
+              lastUpdateId = update.u;
+              firstUpdateProcessed = true;
             }
+          } else {
+            if (lastUpdateId !== null && update.U === lastUpdateId + 1) {
+              updatesToApply.bids.push(...update.b);
+              updatesToApply.asks.push(...update.a);
+              lastUpdateId = update.u;
+            } else {
+              console.warn("Missed an update. Reconnecting.");
+              ws.current?.close();
+              return;
+            }
+          }
         }
-        
-        if(updatesToApply.bids.length > 0 || updatesToApply.asks.length > 0) {
-            dispatch({ type: 'UPDATE', payload: updatesToApply });
+
+        if (updatesToApply.bids.length > 0 || updatesToApply.asks.length > 0) {
+          dispatch({ type: "UPDATE", payload: updatesToApply });
         }
-        
+
         eventQueue = [];
         isFetchingSnapshot = false;
-
       } catch (error: any) {
-        console.error('Snapshot fetch error:', error);
+        console.error("Snapshot fetch error:", error);
         if (isMounted) {
-          setStatus('error');
+          setStatus("error");
           toast({ variant: "destructive", title: "API Error", description: error.message });
         }
-        // Don't try to connect WebSocket if snapshot fails, try reconnecting
         setTimeout(() => {
-            if (isMounted) connect();
+          if (isMounted) connect();
         }, 5000);
         return;
       }
 
       const lowerCaseSymbol = symbol.toLowerCase();
-      const newWs = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${lowerCaseSymbol}@depth/${lowerCaseSymbol}@aggTrade`);
+      const newWs = new WebSocket(
+        `wss://stream.binance.com:9443/stream?streams=${lowerCaseSymbol}@depth/${lowerCaseSymbol}@aggTrade`
+      );
       ws.current = newWs;
 
       newWs.onopen = () => {
-        if (isMounted) setStatus('connected');
+        if (isMounted) setStatus("connected");
       };
 
       newWs.onmessage = (event) => {
@@ -156,42 +154,35 @@ export const useBinanceData = (symbol: string) => {
         const stream = message.stream;
         const data = message.data;
 
-        if (stream.includes('@depth')) {
+        if (stream.includes("@depth")) {
           if (isFetchingSnapshot) {
             eventQueue.push(data);
           } else {
             if (lastUpdateId !== null) {
               if (data.U === lastUpdateId + 1) {
-                  dispatch({ type: 'UPDATE', payload: { bids: data.b, asks: data.a } });
-                  lastUpdateId = data.u;
+                dispatch({ type: "UPDATE", payload: { bids: data.b, asks: data.a } });
+                lastUpdateId = data.u;
               } else if (data.U > lastUpdateId + 1) {
-                  console.warn("Order book out of sync, re-initializing...");
-                  if (ws.current) {
-                      ws.current.close(); // This will trigger the onclose handler to reconnect
-                  }
+                console.warn("Order book out of sync, re-initializing...");
+                if (ws.current) ws.current.close();
               }
             }
           }
-        } else if (stream.includes('@aggTrade')) {
-          setTrades(prev => [data, ...prev].slice(0, 50));
+        } else if (stream.includes("@aggTrade")) {
+          setTrades((prev) => [data, ...prev].slice(0, 50));
         }
       };
 
-      newWs.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        if (isMounted) setStatus('error');
+      newWs.onerror = () => {
+        if (isMounted) setStatus("error");
       };
 
       newWs.onclose = () => {
         if (isMounted) {
-          setStatus('disconnected');
-          // Reconnect logic
+          setStatus("disconnected");
           setTimeout(() => {
-              if(isMounted && ws.current === newWs) { // Only reconnect if this is still the active socket
-                  console.log("Attempting to reconnect...");
-                  connect();
-              }
-          }, 5000); // 5s reconnect delay
+            if (isMounted && ws.current === newWs) connect();
+          }, 5000);
         }
       };
     };
@@ -201,31 +192,29 @@ export const useBinanceData = (symbol: string) => {
     return () => {
       isMounted = false;
       if (ws.current) {
-        ws.current.onclose = null; // Prevent reconnect logic from firing on unmount
+        ws.current.onclose = null;
         ws.current.close();
         ws.current = null;
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, toast]);
 
-  // Throttling mechanism for UI updates
   useEffect(() => {
     const now = Date.now();
     const updateUi = () => {
-        setThrottledBids(new Map(orderBook.bids));
-        setThrottledAsks(new Map(orderBook.asks));
-        lastUiUpdate.current = Date.now();
-    }
-    
+      setThrottledBids(new Map(orderBook.bids));
+      setThrottledAsks(new Map(orderBook.asks));
+      lastUiUpdate.current = Date.now();
+    };
+
     if (now - lastUiUpdate.current > THROTTLE_MS) {
-        updateUi();
+      updateUi();
     } else {
-        const timer = setTimeout(updateUi, THROTTLE_MS - (now - lastUiUpdate.current));
-        return () => clearTimeout(timer);
+      const timer = setTimeout(updateUi, THROTTLE_MS - (now - lastUiUpdate.current));
+      return () => clearTimeout(timer);
     }
   }, [orderBook]);
-
 
   return { bids: throttledBids, asks: throttledAsks, trades, status };
 };
